@@ -13,10 +13,21 @@ DB_FILE = Path(__file__).resolve().parent / "google_repositories.sqlite"
 
 
 def read_page(session, page):
-    time.sleep(1)
-    response = session.get(
-        URL, params={"q": "sort:name-asc", "page": page}, timeout=30
-    )
+    for attempt in range(4):
+        time.sleep(1)
+        time.sleep(4)
+        response = session.get(
+            URL, params={"q": "sort:name-asc", "page": page}, timeout=30
+        )
+        if response.status_code not in {429, 502, 503}:
+            break
+        if attempt == 3:
+            break
+        retry_after = response.headers.get("Retry-After", "")
+        wait = max(120 * (attempt + 1), int(retry_after) if retry_after.isdigit() else 0)
+        print(f"HTTP {response.status_code}。{wait} 秒待機して再開します", flush=True)
+        response.close()
+        time.sleep(wait)
     response.raise_for_status()
     soup = BeautifulSoup(response.content, "html.parser")
     # 通常のHTMLに含まれる表示用データから、丸められていないスター数を読む。
@@ -45,17 +56,35 @@ def read_page(session, page):
 
 
 def scrape():
+    state_file = DB_FILE.parent / ".scrape-state.json"
     with requests.Session() as session:
         session.headers["User-Agent"] = "UniversityClassRepositoryScraper/1.0"
         rows, total, pages = read_page(session, 1)
         if total <= 0 or pages <= 0 or not rows:
             raise ValueError("一覧が空です")
-        print(f"1/{pages} ページ、{len(rows)}/{total} 件取得", flush=True)
-        for page in range(2, pages + 1):
+        completed = 1
+        if state_file.exists():
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if (
+                state["total"] == total and state["pages"] == pages
+                and [row[0] for row in state["rows"][:len(rows)]] == [row[0] for row in rows]
+            ):
+                completed = state["completed"]
+                rows = rows + state["rows"][len(rows):]
+        print(f"{completed}/{pages} ページ、{len(rows)}/{total} 件取得", flush=True)
+        for page in range(completed + 1, pages + 1):
             batch, current_total, current_pages = read_page(session, page)
             if (current_total, current_pages) != (total, pages) or not batch:
                 raise ValueError("巡回中に一覧の件数が変わりました。再実行してください")
             rows.extend(batch)
+            temporary = state_file.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"total": total, "pages": pages, "completed": page, "rows": rows},
+                    ensure_ascii=False,
+                ), encoding="utf-8",
+            )
+            temporary.replace(state_file)
             print(f"{page}/{pages} ページ、{len(rows)}/{total} 件取得", flush=True)
         _, final_total, final_pages = read_page(session, 1)
         if (final_total, final_pages) != (total, pages):

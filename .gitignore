@@ -4,3 +4,5 @@ __pycache__/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+.scrape-state.json
+.scrape-state.tmp
